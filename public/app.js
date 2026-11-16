@@ -52,7 +52,7 @@ const hue = (name) => {
   return h;
 };
 
-const avStyle = (name) => `background:hsl(${hue(name)} 40% 24%);color:hsl(${hue(name)} 70% 82%)`;
+const avStyle = (name) => `--seal:hsl(${hue(name)} 42% 31%)`;
 
 const fmtDur = (ms) =>
   ms >= 60000
