@@ -1,0 +1,20 @@
+{
+  "name": "loup-garou",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Loup-garou multijoueur, chacun sur son telephone, le narrateur est remplace par le serveur.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "sim": "node test/sim.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "qrcode": "^1.5.4",
+    "ws": "^8.18.0"
+  }
+}
