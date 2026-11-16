@@ -1,78 +1,59 @@
 # Loup-garou
 
 Le jeu du loup-garou pour une classe, chacun sur son téléphone. Le narrateur est un
-serveur : il distribue les rôles, cache les informations et ne triche pas.
+programme : il distribue les rôles, cache les informations et ne triche pas.
+
+**Jouer tout de suite : <https://louskyfly.github.io/loup-garou/>**
 
 - 5 à 20 joueurs, un téléphone chacun, rien à installer.
 - Le salon affiche un QR code : les autres scannent et entrent en deux secondes.
 - Rôles : Villageois, Loup-garou, Voyante, Sorcière, Chasseur, Cupidon, Salvateur.
-- Nuit chronométrée, vote du village chronométré, morts annoncées à l'aube.
-- Amoureux (Cupidon) qui meurent ensemble, chasseur qui tire en mourant.
+- Nuit chronométrée, débat et vote chronométrés, morts annoncées à l'aube.
+- Amoureux qui meurent ensemble, chasseur qui tire en mourant.
 
-## Lancer
+## Les deux façons de jouer
+
+### 1. En ligne, depuis GitHub Pages (aucune installation)
+
+Ouvre <https://louskyfly.github.io/loup-garou/>, choisis un pseudo, **Créer une
+partie**, et fais scanner le QR code.
+
+Il n'y a pas de serveur : **c'est l'onglet de l'hôte qui fait tourner la partie**.
+Les autres téléphones s'y connectent directement en WebRTC (PeerJS pour la mise en
+relation). Conséquences à connaître :
+
+- l'hôte doit garder son onglet ouvert pendant toute la partie, écran allumé ;
+- il faut internet (le wifi du lycée suffit), mais pas besoin que tout le monde soit
+  sur le même réseau ;
+- si l'hôte recharge sa page, la partie est perdue — les autres doivent se
+  reconnecter à un nouveau salon ;
+- sur un réseau qui bloque le pair-à-pair (certains wifi scolaires très filtrés), la
+  connexion échoue. Dans ce cas, utilise la version locale ci-dessous.
+
+### 2. En local, avec un vrai serveur (le plus solide)
 
 ```bash
 npm install
 npm start
 ```
 
-Le terminal affiche deux adresses et un QR code :
+Le terminal affiche deux adresses :
 
 ```
 Loup-garou  ->  http://localhost:3000
 En classe   ->  http://192.168.1.42:3000   (meme wifi, scanne le QR)
 ```
 
-1. Ouvre l'adresse sur ton ordinateur, choisis un pseudo, clique **Créer une partie**.
-2. Les autres scannent le QR code de la page (ou tapent le code à 4 lettres).
-3. Quand tout le monde est là, **Lancer la partie**.
-
-Tout le monde doit être sur le même réseau (le wifi du lycée, ou le partage de
-connexion du téléphone). Si les autres n'arrivent pas à se connecter, c'est presque
-toujours le pare-feu Windows qui bloque le port 3000 : autorise Node.js sur le
-réseau privé, ou lance en administrateur :
+Tout le monde doit être sur le même réseau. Si les autres n'arrivent pas à se
+connecter, c'est presque toujours le pare-feu Windows : autorise Node.js sur le
+réseau privé, ou lance une fois en administrateur :
 
 ```powershell
 New-NetFirewallRule -DisplayName "Loup-garou" -Direction Inbound -LocalPort 3000 -Protocol TCP -Action Allow
 ```
 
-## Mettre en ligne
-
-Attention : **GitHub Pages ne peut pas faire tourner ce jeu.** Pages ne sert que des
-fichiers statiques, et le jeu a besoin d'un serveur Node (WebSockets + état des
-parties). GitHub héberge le code, pas le process.
-
-Trois façons de mettre en ligne :
-
-**1. Render, depuis GitHub (gratuit)**
-
-1. Pousse le dépôt sur GitHub.
-2. Sur [render.com](https://render.com) : *New* → *Blueprint*, choisis le dépôt.
-   Le fichier `render.yaml` à la racine fait le reste (build, start, health check,
-   plan gratuit).
-3. Tu obtiens une URL du type `https://loup-garou.onrender.com`, partageable à
-   toute la classe, sans wifi commun.
-
-Le plan gratuit de Render endort le service après 15 min sans trafic : la première
-connexion prend ~30 s à réveiller. WebSockets supportés.
-
-**2. Railway / Fly.io**
-
-Même principe : build `npm ci`, start `npm start`, le `PORT` vient de la plateforme.
-
-**3. En local en cours (le plus simple, zéro latence)**
-
-`npm start` et tout le monde sur le même wifi, voir plus haut.
-
-Une seule instance : l'état des parties est en mémoire, pas en base de données. Pas
-de scale horizontal, ce qui n'a aucune importance pour une classe.
-
-## Intégration continue
-
-`.github/workflows/test.yml` installe le projet, démarre le serveur et fait jouer
-des robots (5, 7, 12 et 20 joueurs) à chaque push. Si une partie se bloque ou si un
-rôle secret fuit, la CI passe au rouge.
-
+Ici l'état vit dans le serveur : un téléphone qui se déconnecte peut revenir, et
+personne n'a besoin de garder un onglet ouvert.
 
 ## Règles appliquées
 
@@ -95,23 +76,39 @@ spéciaux, durées.
 ## Structure
 
 ```
-server.js          machine a etats du jeu + WebSocket + vue personnalisee par joueur
+public/engine.js   moteur du jeu, sans transport (partage entre les deux modes)
+public/app.js      interface : un ecran par phase, plus les deux transports
 public/index.html  page unique
-public/app.js      interface : un ecran par phase
 public/style.css   theme nuit
-test/sim.js        N robots jouent une partie complete (verifie le deroule)
+public/peerjs*.js  WebRTC pour le mode GitHub Pages (lib vendorisee)
+public/qrcode.js   QR code cote client (lib vendorisee)
+server.js          transport Node/WebSocket (mode local)
+test/sim.js        N robots jouent une partie complete contre le serveur
 test/fill.js       ajoute des robots a une salle existante (tester l'interface)
 ```
 
-`server.js` est autoritaire : le client ne reçoit jamais le rôle des autres joueurs,
-même dans le code source de la page. Chaque téléphone reçoit une vue différente.
+`engine.js` est autoritaire : le client ne reçoit jamais le rôle des autres joueurs,
+même dans le code source de la page. Chaque téléphone reçoit une vue différente et
+filtrée.
 
 ## Tests
 
+Le serveur doit tourner :
+
 ```bash
-PORT=3100 node server.js          # dans un terminal
-PORT=3100 node test/sim.js 7      # dans un autre : 7 robots jouent jusqu'au bout
+PORT=3100 node server.js
+PORT=3100 node test/sim.js 7     # 7 robots jouent jusqu'au bout
 ```
 
 La simulation vérifie aussi qu'aucune information secrète ne fuit vers un joueur qui
-n'a pas le droit de la voir.
+n'a pas le droit de la voir. `.github/workflows/test.yml` rejoue tout à chaque push
+(5, 7, 12 et 20 joueurs).
+
+## Publier une nouvelle version du site
+
+GitHub Pages sert la branche `gh-pages`, qui contient le contenu de `public/` à la
+racine. Après une modification :
+
+```bash
+git subtree push --prefix public origin gh-pages
+```

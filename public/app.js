@@ -15,7 +15,6 @@ try {
   sess = {};
 }
 
-let ws = null;
 let S = null;
 let intent = null;
 let sel = [];
@@ -70,7 +69,7 @@ function toast(m) {
 }
 
 function send(o) {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify(o));
+  if (net && net.send) net.send(o);
 }
 
 function save() {
@@ -78,25 +77,26 @@ function save() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Connexion                                                          */
+/* Transport                                                          */
+/* WebSocket quand un serveur Node sert la page (npm start).            */
+/* WebRTC (PeerJS) quand la page est statique : l'onglet de l'hote      */
+/* fait tourner le moteur, les autres s'y connectent directement.       */
 /* ------------------------------------------------------------------ */
 
-function connect() {
-  if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}`);
+const E = window.LoupEngine;
 
-  ws.onopen = () => {
-    if (intent) send(intent);
-  };
+const IS_PAGES =
+  /\.github\.io$/i.test(location.hostname) || /\.pages\.dev$/i.test(location.hostname);
+const P2P = IS_PAGES || /(^|[?&])p2p=1(&|$)/.test(location.search);
+const PEER_PREFIX = 'loupgarou-';
 
-  ws.onmessage = (ev) => {
-    let m;
-    try {
-      m = JSON.parse(ev.data);
-    } catch (e) {
-      return;
-    }
+let net = null;
+let hostRoom = null;
+let hostPeer = null;
+let hostTimers = [];
+
+function handleServerMessage(m) {
+  {
     if (m.t === 'joined') {
       sess.code = m.code;
       sess.token = m.token;
@@ -129,18 +129,290 @@ function connect() {
       render();
       toast(m.reason || 'Session ouverte ailleurs');
     }
+  }
+}
+
+/* ---------- WebSocket (serveur Node) ---------- */
+
+function wsConnect() {
+  if (net && net.open) return;
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const socket = new WebSocket(`${proto}//${location.host}`);
+
+  net = {
+    open: true,
+    send(o) {
+      if (socket.readyState === 1) socket.send(JSON.stringify(o));
+    },
+    close() {
+      net = null;
+      try {
+        socket.close();
+      } catch (e) {
+        /* ignore */
+      }
+    },
   };
 
-  ws.onclose = () => {
-    ws = null;
+  socket.onopen = () => {
+    if (intent) net.send(intent);
+  };
+
+  socket.onmessage = (ev) => {
+    let m;
+    try {
+      m = JSON.parse(ev.data);
+    } catch (e) {
+      return;
+    }
+    handleServerMessage(m);
+  };
+
+  socket.onclose = () => {
+    net = null;
     clearTimeout(retry);
     if (sess.token && sess.code) {
       retry = setTimeout(() => {
         intent = { t: 'join', code: sess.code, name: sess.name, token: sess.token };
-        connect();
+        wsConnect();
       }, 1200);
     }
   };
+}
+
+/* ---------- WebRTC (GitHub Pages) ---------- */
+
+function qrDataUrl(text) {
+  try {
+    const q = window.qrcode(0, 'M');
+    q.addData(text);
+    q.make();
+    return q.createDataURL(4, 1);
+  } catch (e) {
+    return '';
+  }
+}
+
+function joinUrl(code) {
+  const u = new URL(location.href);
+  u.hash = '';
+  const keepP2P = P2P && !IS_PAGES;
+  u.search = '?c=' + code + (keepP2P ? '&p2p=1' : '');
+  return u.toString();
+}
+
+function hostBroadcast(room) {
+  const now = Date.now();
+  for (const p of room.players) {
+    let v;
+    try {
+      v = E.view(room, p, now);
+    } catch (e) {
+      continue;
+    }
+    if (p.link === 'self') handleServerMessage(v);
+    else if (p.link && p.link.open) {
+      try {
+        p.link.send(v);
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+}
+
+function hostAccept(room, conn, msg) {
+  const token = msg.token ? String(msg.token) : null;
+  if (token) {
+    const ex = room.players.find((p) => p.token === token);
+    if (ex) {
+      ex.link = conn;
+      ex.connected = true;
+      if (msg.name) ex.name = String(msg.name).trim().slice(0, 14) || ex.name;
+      conn.send({ t: 'joined', code: room.code, token: ex.token, id: ex.id });
+      return hostBroadcast(room);
+    }
+  }
+  if (room.phase !== 'lobby') {
+    return conn.send({ t: 'error', fatal: true, message: 'La partie a déjà commencé.' });
+  }
+  if (room.players.length >= 20) {
+    return conn.send({ t: 'error', fatal: true, message: 'La salle est pleine (20 max).' });
+  }
+  const p = E.newPlayer(room, msg.name);
+  p.link = conn;
+  conn.send({ t: 'joined', code: room.code, token: p.token, id: p.id });
+  hostBroadcast(room);
+}
+
+function startHost(name, attempt) {
+  attempt = attempt || 0;
+  if (attempt > 3) {
+    toast('Impossible de créer le salon, réessaie.');
+    S = null;
+    render();
+    return;
+  }
+
+  const ctx = {
+    broadcast: hostBroadcast,
+    error(playerId, message) {
+      const p = hostRoom ? E.findPlayer(hostRoom, playerId) : null;
+      if (!p || p.link === 'self') return handleServerMessage({ t: 'error', message: message });
+      if (p.link && p.link.open) p.link.send({ t: 'error', message: message });
+    },
+  };
+
+  const room = E.newRoom(ctx);
+  hostRoom = room;
+  const me = E.newPlayer(room, name);
+  me.link = 'self';
+
+  // L'hote parle directement au moteur : il n'y a pas de serveur.
+  net = {
+    open: true,
+    send(o) {
+      if (!hostRoom) return;
+      const self = E.findPlayer(hostRoom, me.id);
+      if (!self) return;
+      E.handle(hostRoom, self, o);
+    },
+    close() {
+      net = null;
+    },
+  };
+
+  const peer = new Peer(PEER_PREFIX + room.code, { debug: 0 });
+  hostPeer = peer;
+
+  peer.on('error', (e) => {
+    if (e.type === 'unavailable-id') {
+      try {
+        peer.destroy();
+      } catch (x) {
+        /* ignore */
+      }
+      E.rooms.delete(room.code);
+      hostPeer = null;
+      hostRoom = null;
+      return startHost(name, attempt + 1);
+    }
+    console.warn('peer', e.type, e.message);
+  });
+
+  peer.on('open', () => {
+    handleServerMessage({ t: 'joined', code: room.code, token: me.token, id: me.id });
+    hostBroadcast(room);
+    hostTimers.forEach((t) => clearInterval(t));
+    hostTimers = [
+      setInterval(() => E.tick(room), 200),
+      setInterval(() => {
+        if (room.deadline) hostBroadcast(room);
+      }, 1000),
+    ];
+  });
+
+  peer.on('connection', (conn) => {
+    conn.on('data', (raw) => {
+      let msg = raw;
+      if (typeof raw === 'string') {
+        try {
+          msg = JSON.parse(raw);
+        } catch (e) {
+          return;
+        }
+      }
+      if (!msg || !msg.t) return;
+      if (msg.t === 'join') return hostAccept(room, conn, msg);
+      const p = room.players.find((x) => x.link === conn);
+      if (!p) return;
+      E.handle(room, p, msg);
+    });
+
+    conn.on('close', () => {
+      const p = room.players.find((x) => x.link === conn);
+      if (!p) return;
+      p.connected = false;
+      p.link = null;
+      if (p.isHost) {
+        p.isHost = false;
+        E.ensureHost(room);
+      }
+      hostBroadcast(room);
+    });
+  });
+}
+
+function startJoin(code, name, token) {
+  const peer = new Peer({ debug: 0 });
+  let conn = null;
+  let dead = false;
+
+  const fail = (message) => {
+    if (dead) return;
+    dead = true;
+    clearTimeout(timer);
+    net = null;
+    try {
+      peer.destroy();
+    } catch (e) {
+      /* ignore */
+    }
+    handleServerMessage({ t: 'error', fatal: true, message: message });
+  };
+
+  const timer = setTimeout(
+    () => fail('Pas de réponse du salon : hôte déconnecté ou code expiré.'),
+    12000
+  );
+
+  net = {
+    open: true,
+    send(o) {
+      if (conn && conn.open) conn.send(o);
+    },
+    close() {
+      dead = true;
+      try {
+        peer.destroy();
+      } catch (e) {
+        /* ignore */
+      }
+    },
+  };
+
+  peer.on('error', (e) => {
+    if (e.type === 'peer-unavailable') {
+      fail("Aucune partie avec ce code — ou l'hôte a fermé son onglet.");
+    } else if (e.type === 'network' || e.type === 'server-error') {
+      fail('Le serveur de connexion ne répond pas. Réessaie dans un instant.');
+    } else if (e.type === 'browser-incompatible') {
+      fail('Ce navigateur ne gère pas le pair-à-pair.');
+    }
+  });
+
+  peer.on('open', () => {
+    conn = peer.connect(PEER_PREFIX + code, { reliable: true });
+
+    conn.on('open', () => {
+      clearTimeout(timer);
+      conn.send({ t: 'join', code: code, name: name, token: token || undefined });
+    });
+
+    conn.on('data', (raw) => {
+      let m = raw;
+      if (typeof raw === 'string') {
+        try {
+          m = JSON.parse(raw);
+        } catch (e) {
+          return;
+        }
+      }
+      handleServerMessage(m);
+    });
+
+    conn.on('close', () => fail("L'hôte s'est déconnecté."));
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -316,7 +588,8 @@ function configPanel() {
 }
 
 function lobbyView() {
-  const url = `${location.origin}/?c=${S.code}`;
+  const url = joinUrl(S.code);
+  const qr = qrDataUrl(url);
   const isHost = S.me.isHost;
   return `
   <div class="codebox">
@@ -325,7 +598,7 @@ function lobbyView() {
       <div class="bigcode disp">${S.code}</div>
       <button class="btn btn-sm btn-ghost" data-a="copy">Copier le lien</button>
     </div>
-    <div class="qr"><img alt="QR code" src="/qr?text=${encodeURIComponent(url)}"></div>
+    ${qr ? `<div class="qr"><img alt="QR code" src="${qr}"></div>` : ''}
   </div>
   <div class="panel">
     <div class="panel-title">Joueurs · ${S.players.length}</div>
@@ -337,6 +610,7 @@ function lobbyView() {
       ? `<button class="btn btn-primary btn-lg btn-block" data-a="start" ${S.canStart ? '' : 'disabled'}>Lancer la partie</button>
          <p class="tiny dim center" style="margin:0">${S.canStart ? 'Scanne le QR code, on commence quand tu veux.' : `Il faut au moins ${S.minPlayers} joueurs.`}</p>`
       : '<p class="tiny dim center" style="margin:0">En attente de l\'hôte…</p>'}
+    ${P2P ? '<p class="tiny dim center" style="margin:0;opacity:.75">Garde cet onglet ouvert pendant toute la partie.</p>' : ''}
   </div>`;
 }
 
@@ -687,9 +961,10 @@ document.addEventListener('click', (e) => {
         return toast('Choisis un pseudo (2 lettres min).');
       }
       sess = { name };
+      save();
+      if (P2P) return startHost(name);
       intent = { t: 'join', name };
-      connect();
-      if (ws && ws.readyState === 1) send(intent);
+      wsConnect();
       return;
     }
     case 'join': {
@@ -706,18 +981,19 @@ document.addEventListener('click', (e) => {
         return toast('Le code fait 4 caractères.');
       }
       sess = { name, code };
+      save();
+      if (P2P) return startJoin(code, name, null);
       intent = { t: 'join', name, code };
-      connect();
-      if (ws && ws.readyState === 1) send(intent);
+      wsConnect();
       return;
     }
     case 'resume':
+      if (P2P) return startJoin(sess.code, sess.name || draftName, sess.token);
       intent = { t: 'join', code: sess.code, name: sess.name || draftName, token: sess.token };
-      connect();
-      if (ws && ws.readyState === 1) send(intent);
+      wsConnect();
       return;
     case 'copy': {
-      const url = `${location.origin}/?c=${S.code}`;
+      const url = joinUrl(S.code);
       const done = () => toast('Lien copié');
       if (navigator.clipboard) navigator.clipboard.writeText(url).then(done, () => toast(url));
       else toast(url);
@@ -784,9 +1060,9 @@ document.addEventListener('click', (e) => {
 /* Demarrage                                                          */
 /* ------------------------------------------------------------------ */
 
-if (sess.token && sess.code) {
-  intent = { t: 'join', code: sess.code, name: sess.name, token: sess.token };
-}
 if (sess.name) draftName = sess.name;
 render();
-connect();
+if (!P2P && sess.token && sess.code) {
+  intent = { t: 'join', code: sess.code, name: sess.name, token: sess.token };
+  wsConnect();
+}
